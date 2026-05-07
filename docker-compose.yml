@@ -1,0 +1,160 @@
+version: '3.8'
+
+services:
+  # Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: accessibility-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/accessibility_db
+      - DATABASE_ASYNC_URL=postgresql+asyncpg://postgres:postgres@db:5432/accessibility_db
+      - REDIS_URL=redis://redis:6379/0
+      - LLM_BASE_URL=http://ollama:11434
+      - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
+      - DEBUG=true
+    volumes:
+      - ./backend:/app
+      - backend_storage:/app/storage
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      ollama:
+        condition: service_started
+    networks:
+      - accessibility-network
+    restart: unless-stopped
+
+  # Frontend Dashboard
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: accessibility-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+    networks:
+      - accessibility-network
+    restart: unless-stopped
+
+  # PostgreSQL Database
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: accessibility-db
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=accessibility_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - accessibility-network
+    restart: unless-stopped
+
+  # Redis for caching and message queue
+  redis:
+    image: redis:7-alpine
+    container_name: accessibility-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - accessibility-network
+    restart: unless-stopped
+
+  # Ollama for open-source LLMs
+  ollama:
+    image: ollama/ollama:latest
+    container_name: accessibility-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    # Uncomment below if you have GPU support
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    networks:
+      - accessibility-network
+    restart: unless-stopped
+
+  # Celery Worker (for async tasks)
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: accessibility-celery-worker
+    command: celery -A app.services.celery_app worker --loglevel=info
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/accessibility_db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - LLM_BASE_URL=http://ollama:11434
+    volumes:
+      - ./backend:/app
+      - backend_storage:/app/storage
+    depends_on:
+      - db
+      - redis
+      - ollama
+    networks:
+      - accessibility-network
+    restart: unless-stopped
+
+  # Celery Beat (for scheduled tasks like monitoring)
+  celery-beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: accessibility-celery-beat
+    command: celery -A app.services.celery_app beat --loglevel=info
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/accessibility_db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    volumes:
+      - ./backend:/app
+    depends_on:
+      - db
+      - redis
+    networks:
+      - accessibility-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  ollama_data:
+  backend_storage:
+
+networks:
+  accessibility-network:
+    driver: bridge
