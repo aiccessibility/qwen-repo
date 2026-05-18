@@ -104,51 +104,6 @@ services:
       - accessibility-network
     restart: unless-stopped
 
-  # Celery Worker (for async tasks)
-  celery-worker:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: accessibility-celery-worker
-    command: celery -A app.services.celery_app worker --loglevel=info
-    environment:
-      - DATABASE_URL=postgresql://postgres:postgres@db:5432/accessibility_db
-      - REDIS_URL=redis://redis:6379/0
-      - CELERY_BROKER_URL=redis://redis:6379/1
-      - CELERY_RESULT_BACKEND=redis://redis:6379/2
-      - LLM_BASE_URL=http://ollama:11434
-    volumes:
-      - ./backend:/app
-      - backend_storage:/app/storage
-    depends_on:
-      - db
-      - redis
-      - ollama
-    networks:
-      - accessibility-network
-    restart: unless-stopped
-
-  # Celery Beat (for scheduled tasks like monitoring)
-  celery-beat:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: accessibility-celery-beat
-    command: celery -A app.services.celery_app beat --loglevel=info
-    environment:
-      - DATABASE_URL=postgresql://postgres:postgres@db:5432/accessibility_db
-      - REDIS_URL=redis://redis:6379/0
-      - CELERY_BROKER_URL=redis://redis:6379/1
-      - CELERY_RESULT_BACKEND=redis://redis:6379/2
-    volumes:
-      - ./backend:/app
-    depends_on:
-      - db
-      - redis
-    networks:
-      - accessibility-network
-    restart: unless-stopped
-
 volumes:
   postgres_data:
   redis_data:
