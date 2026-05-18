@@ -19,6 +19,7 @@ services:
     volumes:
       - ./backend:/app
       - backend_storage:/app/storage
+      - ./scripts:/docker-entrypoint-initdb.d
     depends_on:
       db:
         condition: service_healthy
@@ -29,6 +30,37 @@ services:
     networks:
       - accessibility-network
     restart: unless-stopped
+    command: >
+      sh -c "/docker-entrypoint-initdb.d/init-db.sh && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+
+  # Celery Worker for async task processing
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: accessibility-celery-worker
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/accessibility_db
+      - DATABASE_ASYNC_URL=postgresql+asyncpg://postgres:postgres@db:5432/accessibility_db
+      - REDIS_URL=redis://redis:6379/0
+      - LLM_BASE_URL=http://ollama:11434
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    volumes:
+      - ./backend:/app
+      - backend_storage:/app/storage
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      ollama:
+        condition: service_started
+    networks:
+      - accessibility-network
+    restart: unless-stopped
+    command: >
+      sh -c "chmod +x /app/scripts/start_celery_worker.sh && /app/scripts/start_celery_worker.sh"
 
   # Frontend Dashboard
   frontend:
@@ -39,7 +71,8 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
+      - NEXT_PUBLIC_API_URL=http://backend:8000/api/v1
+      - NEXT_PUBLIC_API_URL_EXTERNAL=http://localhost:8000/api/v1
     volumes:
       - ./frontend:/app
       - /app/node_modules
@@ -104,11 +137,53 @@ services:
       - accessibility-network
     restart: unless-stopped
 
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: accessibility-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    networks:
+      - accessibility-network
+    restart: unless-stopped
+    depends_on:
+      - backend
+
+  # Grafana for visualization and dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: accessibility-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+    networks:
+      - accessibility-network
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+
 volumes:
   postgres_data:
   redis_data:
   ollama_data:
   backend_storage:
+  prometheus_data:
+  grafana_data:
 
 networks:
   accessibility-network:

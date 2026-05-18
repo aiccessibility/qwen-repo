@@ -1,5 +1,6 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, Response
+from fastapi import APIRouter, HTTPException, Depends, Response
 from fastapi.responses import FileResponse, JSONResponse
+from sqlalchemy.orm import Session
 from typing import List, Optional
 from pydantic import BaseModel, HttpUrl
 import uuid
@@ -7,12 +8,12 @@ from datetime import datetime
 
 from app.agents.workflow import create_audit_graph, AuditState
 from app.utils.config import settings
+from app.db.database import get_db
+from app.models.audit import Audit
+from app.tasks.audit_tasks import run_audit_workflow_task, run_monitor_workflow_task
 
 
 router = APIRouter()
-
-# In-memory store for audit states (replace with database in production)
-audit_store = {}
 
 
 class AuditRequest(BaseModel):
@@ -46,7 +47,7 @@ class AuditStatusResponse(BaseModel):
 @router.post("/audit", response_model=AuditResponse, tags=["Auditing"])
 async def start_audit(
     request: AuditRequest,
-    background_tasks: BackgroundTasks
+    db: Session = Depends(get_db)
 ):
     """
     Start a new accessibility audit for a given URL.
@@ -58,11 +59,26 @@ async def start_audit(
     4. Create a comprehensive report (PDF, HTML, JSON)
     
     Results are available via the status endpoint or webhook.
+    The audit runs asynchronously in a Celery worker queue.
     """
     # Generate unique audit ID
     audit_id = str(uuid.uuid4())
     
-    # Initialize audit state
+    # Create audit record in database
+    db_audit = Audit(
+        id=audit_id,
+        url=request.url,
+        wcag_level=request.wcag_level or "AA",
+        wcag_version=request.wcag_version or "2.2",
+        depth=request.depth or 1,
+        include_screenshots=request.include_screenshots or True,
+        status="pending",
+        progress=0,
+    )
+    db.add(db_audit)
+    db.commit()
+    
+    # Initialize audit state for LangGraph workflow
     initial_state: AuditState = {
         "url": request.url,
         "html_content": "",
@@ -78,62 +94,42 @@ async def start_audit(
         "report_id": audit_id,
         "scan_data": None,
         "error": None,
+        "audit_id": audit_id,  # Pass audit_id to workflow
     }
     
-    # Store initial state
-    audit_store[audit_id] = initial_state
+    # Queue the audit task in Celery
+    task = run_audit_workflow_task.delay(audit_id, initial_state)
     
-    # Get the compiled workflow graph
-    audit_graph = create_audit_graph()
-    
-    # Run the workflow in background
-    background_tasks.add_task(run_audit_workflow, audit_id, initial_state, audit_graph)
+    # Store task ID for tracking
+    db_audit.celery_task_id = task.id
+    db.commit()
     
     return AuditResponse(
         audit_id=audit_id,
-        status="pending",
+        status="queued",
         url=request.url,
-        message="Audit started successfully. Check status with GET /audit/{audit_id}"
+        message=f"Audit queued successfully. Task ID: {task.id}. Check status with GET /audit/{audit_id}"
     )
 
 
-async def run_audit_workflow(audit_id: str, initial_state: AuditState, graph):
-    """Run the audit workflow asynchronously."""
-    try:
-        # Update status to processing
-        audit_store[audit_id]["status"] = "processing"
-        
-        # Execute the LangGraph workflow
-        result = await graph.ainvoke(initial_state)
-        
-        # Store results
-        audit_store[audit_id] = result
-        
-        print(f"Audit {audit_id} completed: {result.get('status')}")
-        print(f"Violations found: {len(result.get('wcag_violations', []))}")
-        print(f"Report paths: {result.get('report_paths')}")
-        
-    except Exception as e:
-        print(f"Audit {audit_id} failed: {str(e)}")
-        audit_store[audit_id]["status"] = "error"
-        audit_store[audit_id]["error"] = str(e)
-
 
 @router.get("/audit/{audit_id}", response_model=AuditStatusResponse, tags=["Auditing"])
-async def get_audit_status(audit_id: str):
+async def get_audit_status(audit_id: str, db: Session = Depends(get_db)):
     """
     Get the status of an ongoing or completed audit.
     
     Returns current progress and preliminary results if available.
+    Now uses database as primary source since Celery handles execution.
     """
-    if audit_id not in audit_store:
+    # Query database for audit status
+    db_audit = db.query(Audit).filter(Audit.id == audit_id).first()
+    if not db_audit:
         raise HTTPException(status_code=404, detail="Audit not found")
-    
-    state = audit_store[audit_id]
     
     # Calculate progress based on status
     status_progress = {
         "pending": 0,
+        "queued": 5,
         "scanning": 20,
         "scanned": 30,
         "analyzing": 50,
@@ -145,59 +141,65 @@ async def get_audit_status(audit_id: str):
         "error": 0
     }
     
-    progress = status_progress.get(state.get("status", "pending"), 0)
+    progress = status_progress.get(db_audit.status, db_audit.progress)
     
     return AuditStatusResponse(
         audit_id=audit_id,
-        status=state.get("status", "unknown"),
+        status=db_audit.status,
         progress=progress,
-        violations_count=len(state.get("wcag_violations", [])),
-        severity_summary=state.get("severity_summary"),
-        report_url=state.get("report_url"),
-        error=state.get("error")
+        violations_count=len(db_audit.wcag_violations or []),
+        severity_summary=db_audit.severity_summary,
+        report_url=db_audit.report_url,
+        error=db_audit.error
     )
 
 
 @router.get("/audit/{audit_id}/report", tags=["Auditing"])
-async def get_audit_report(audit_id: str, format: Optional[str] = "json"):
+async def get_audit_report(audit_id: str, format: Optional[str] = "json", db: Session = Depends(get_db)):
     """
     Download the complete audit report in various formats.
     
     Supported formats: json, pdf, html
     """
-    if audit_id not in audit_store:
+    # Query database for audit
+    db_audit = db.query(Audit).filter(Audit.id == audit_id).first()
+    if not db_audit:
         raise HTTPException(status_code=404, detail="Audit not found")
     
-    state = audit_store[audit_id]
-    
-    if state.get("status") != "completed":
+    if db_audit.status != "completed":
         raise HTTPException(
             status_code=400,
-            detail=f"Report not ready yet. Current status: {state.get('status')}"
+            detail=f"Report not ready yet. Current status: {db_audit.status}"
         )
     
-    report_paths = state.get("report_paths", {})
+    # Build report paths from storage directory
+    import os
+    from app.utils.config import settings
     
-    if not report_paths:
-        raise HTTPException(status_code=404, detail="Report files not found")
+    storage_dir = settings.STORAGE_DIR or "/app/storage"
+    report_paths = {
+        "json": os.path.join(storage_dir, "reports", f"{audit_id}.json"),
+        "html": os.path.join(storage_dir, "reports", f"{audit_id}.html"),
+        "pdf": os.path.join(storage_dir, "reports", f"{audit_id}.pdf"),
+    }
     
     format_lower = format.lower()
     
     if format_lower == "json":
         file_path = report_paths.get("json")
-        if not file_path:
+        if not file_path or not os.path.exists(file_path):
             raise HTTPException(status_code=404, detail="JSON report not found")
         return FileResponse(file_path, media_type="application/json", filename=f"audit_{audit_id}.json")
     
     elif format_lower == "html":
         file_path = report_paths.get("html")
-        if not file_path:
+        if not file_path or not os.path.exists(file_path):
             raise HTTPException(status_code=404, detail="HTML report not found")
         return FileResponse(file_path, media_type="text/html", filename=f"audit_{audit_id}.html")
     
     elif format_lower == "pdf":
         file_path = report_paths.get("pdf")
-        if not file_path:
+        if not file_path or not os.path.exists(file_path):
             raise HTTPException(status_code=404, detail="PDF report not found")
         return FileResponse(file_path, media_type="application/pdf", filename=f"audit_{audit_id}.pdf")
     
@@ -209,40 +211,36 @@ async def get_audit_report(audit_id: str, format: Optional[str] = "json"):
 
 
 @router.get("/audit/{audit_id}/results", tags=["Auditing"])
-async def get_audit_results(audit_id: str):
+async def get_audit_results(audit_id: str, db: Session = Depends(get_db)):
     """
     Get the full audit results as JSON.
     """
-    if audit_id not in audit_store:
+    # Query database
+    db_audit = db.query(Audit).filter(Audit.id == audit_id).first()
+    if not db_audit:
         raise HTTPException(status_code=404, detail="Audit not found")
     
-    state = audit_store[audit_id]
-    
-    if state.get("status") != "completed":
+    if db_audit.status != "completed":
         raise HTTPException(
             status_code=400,
-            detail=f"Results not ready yet. Current status: {state.get('status')}"
+            detail=f"Results not ready yet. Current status: {db_audit.status}"
         )
     
     return {
         "audit_id": audit_id,
-        "url": state.get("url"),
-        "status": state.get("status"),
-        "scanned_at": state.get("scan_data", {}).get("scanned_at"),
-        "metadata": state.get("scan_data", {}).get("metadata", {}),
-        "severity_summary": state.get("severity_summary", {}),
-        "wcag_violations": state.get("wcag_violations", []),
-        "quick_issues": state.get("scan_data", {}).get("quick_issues", []),
-        "recommendations": state.get("recommendations", []),
-        "aria_info": state.get("scan_data", {}).get("aria_info", {}),
-        "report_paths": state.get("report_paths")
+        "url": db_audit.url,
+        "status": db_audit.status,
+        "severity_summary": db_audit.severity_summary or {},
+        "wcag_violations": db_audit.wcag_violations or [],
+        "recommendations": db_audit.recommendations or [],
+        "completed_at": db_audit.completed_at.isoformat() if db_audit.completed_at else None
     }
 
 
 @router.post("/monitor", response_model=AuditResponse, tags=["Monitoring"])
 async def start_monitoring(
     request: AuditRequest,
-    background_tasks: BackgroundTasks
+    db: Session = Depends(get_db)
 ):
     """
     Start continuous monitoring for a URL.
@@ -256,8 +254,20 @@ async def start_monitoring(
     Monitoring continues until explicitly stopped.
     """
     from app.agents.workflow import create_monitor_graph
+    from app.models.monitor import Monitor
     
     monitor_id = str(uuid.uuid4())
+    
+    # Create monitor record in database
+    db_monitor = Monitor(
+        id=monitor_id,
+        url=request.url,
+        wcag_level=request.wcag_level or "AA",
+        wcag_version=request.wcag_version or "2.2",
+        status="active",
+    )
+    db.add(db_monitor)
+    db.commit()
     
     # Initialize monitor state
     initial_state: AuditState = {
@@ -275,52 +285,35 @@ async def start_monitoring(
         "report_id": monitor_id,
         "scan_data": None,
         "error": None,
+        "audit_id": monitor_id,
     }
     
-    # Store initial state
-    audit_store[monitor_id] = initial_state
+    # Queue the monitoring task in Celery
+    task = run_monitor_workflow_task.delay(monitor_id, initial_state)
     
-    # Get the monitoring workflow
-    monitor_graph = create_monitor_graph()
-    
-    # Run the workflow in background
-    background_tasks.add_task(run_monitor_workflow, monitor_id, initial_state, monitor_graph)
+    # Store task ID for tracking
+    db_monitor.celery_task_id = task.id
+    db.commit()
     
     return AuditResponse(
         audit_id=monitor_id,
-        status="active",
+        status="queued",
         url=request.url,
-        message="Monitoring started. Initial audit in progress."
+        message=f"Monitoring queued. Task ID: {task.id}. Initial audit in progress."
     )
 
 
-async def run_monitor_workflow(monitor_id: str, initial_state: AuditState, graph):
-    """Run the monitoring workflow asynchronously."""
-    try:
-        audit_store[monitor_id]["status"] = "processing"
-        result = await graph.ainvoke(initial_state)
-        audit_store[monitor_id] = result
-        
-        # Check for alerts
-        if result.get("alert"):
-            print(f"🚨 ALERT: {result['alert']['message']}")
-        
-        print(f"Monitor {monitor_id} completed: {result.get('status')}")
-        
-    except Exception as e:
-        print(f"Monitor {monitor_id} failed: {str(e)}")
-        audit_store[monitor_id]["status"] = "error"
-        audit_store[monitor_id]["error"] = str(e)
-
-
 @router.delete("/monitor/{monitor_id}", tags=["Monitoring"])
-async def stop_monitoring(monitor_id: str):
+async def stop_monitoring(monitor_id: str, db: Session = Depends(get_db)):
     """Stop continuous monitoring for a URL."""
-    if monitor_id not in audit_store:
+    from app.models.monitor import Monitor
+    
+    db_monitor = db.query(Monitor).filter(Monitor.id == monitor_id).first()
+    if not db_monitor:
         raise HTTPException(status_code=404, detail="Monitor not found")
     
-    # In production, update database and stop scheduled tasks
-    audit_store[monitor_id]["status"] = "stopped"
+    db_monitor.status = "stopped"
+    db.commit()
     
     return {"message": f"Monitoring {monitor_id} stopped successfully"}
 

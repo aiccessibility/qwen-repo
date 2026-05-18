@@ -1,9 +1,11 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from prometheus_fastapi_instrumentator import PrometheusFastApiInstrumentator
 
 from app.utils.config import settings
 from app.api.v1.router import api_router
+from app.db.database import init_db
 
 
 @asynccontextmanager
@@ -12,6 +14,14 @@ async def lifespan(app: FastAPI):
     # Startup
     print(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
     print(f"Debug mode: {settings.DEBUG}")
+    
+    # Initialize database tables
+    try:
+        init_db()
+        print("✅ Database initialized successfully")
+    except Exception as e:
+        print(f"⚠️  Database initialization warning: {e}")
+    
     yield
     # Shutdown
     print("Shutting down application")
@@ -53,6 +63,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Prometheus instrumentation
+instrumentator = PrometheusFastApiInstrumentator(
+    should_respect_env_var=True,
+    should_instrument_requests_inprogress=True,
+    excluded_handlers=[".*health.*", "/metrics", "/docs", "/redoc"],
+)
+instrumentator.instrument(app).expose(app, endpoint="/metrics")
 
 
 @app.get("/")
