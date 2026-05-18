@@ -1,0 +1,173 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "accessibility-main",
+    "title": "Accessibility Monitoring Dashboard",
+    "tags": ["accessibility", "wcag"],
+    "timezone": "browser",
+    "schemaVersion": 16,
+    "version": 0,
+    "refresh": "5s",
+    "panels": [
+      {
+        "id": 1,
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+        "type": "stat",
+        "title": "Total Audits (Last 30 Days)",
+        "targets": [
+          {
+            "expr": "sum(accessibility_audits_total)",
+            "legendFormat": "Total Audits"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "green", "value": null},
+                {"color": "blue", "value": 100}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 2,
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+        "type": "stat",
+        "title": "Active Audits",
+        "targets": [
+          {
+            "expr": "sum(accessibility_audits_active)",
+            "legendFormat": "Active"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 5},
+                {"color": "red", "value": 10}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 3,
+        "gridPos": {"h": 9, "w": 24, "x": 0, "y": 8},
+        "type": "graph",
+        "title": "Violation Trends Over Time",
+        "targets": [
+          {
+            "expr": "sum(accessibility_violations_critical)",
+            "legendFormat": "Critical",
+            "color": "#FF0000"
+          },
+          {
+            "expr": "sum(accessibility_violations_serious)",
+            "legendFormat": "Serious",
+            "color": "#FFA500"
+          },
+          {
+            "expr": "sum(accessibility_violations_moderate)",
+            "legendFormat": "Moderate",
+            "color": "#FFFF00"
+          },
+          {
+            "expr": "sum(accessibility_violations_minor)",
+            "legendFormat": "Minor",
+            "color": "#00FF00"
+          }
+        ],
+        "yaxes": [
+          {"label": "Count", "show": true},
+          {"show": true}
+        ],
+        "xaxis": {
+          "show": true,
+          "mode": "time"
+        }
+      },
+      {
+        "id": 4,
+        "gridPos": {"h": 9, "w": 24, "x": 0, "y": 17},
+        "type": "graph",
+        "title": "Compliance Score History",
+        "targets": [
+          {
+            "expr": "avg(accessibility_compliance_score)",
+            "legendFormat": "Average Compliance Score",
+            "color": "#4CAF50"
+          }
+        ],
+        "yaxes": [
+          {"label": "Score (0-100)", "min": 0, "max": 100, "show": true},
+          {"show": true}
+        ],
+        "xaxis": {
+          "show": true,
+          "mode": "time"
+        }
+      },
+      {
+        "id": 5,
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 26},
+        "type": "piechart",
+        "title": "Violations by Severity",
+        "targets": [
+          {
+            "expr": "sum(accessibility_violations_critical)",
+            "legendFormat": "Critical"
+          },
+          {
+            "expr": "sum(accessibility_violations_serious)",
+            "legendFormat": "Serious"
+          },
+          {
+            "expr": "sum(accessibility_violations_moderate)",
+            "legendFormat": "Moderate"
+          },
+          {
+            "expr": "sum(accessibility_violations_minor)",
+            "legendFormat": "Minor"
+          }
+        ]
+      },
+      {
+        "id": 6,
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 26},
+        "type": "table",
+        "title": "Recent Audit Results",
+        "targets": [
+          {
+            "expr": "accessibility_audit_duration_seconds",
+            "legendFormat": "{{url}}"
+          }
+        ],
+        "transformations": [
+          {
+            "id": "organize",
+            "options": {
+              "excludeByName": {},
+              "indexByName": {},
+              "renameByName": {
+                "Time": "Timestamp",
+                "Value": "Duration (s)",
+                "url": "URL"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "overwrite": true
+}

@@ -22,10 +22,11 @@ CREATE TABLE IF NOT EXISTS audits (
     url VARCHAR(2048) NOT NULL,
     wcag_level VARCHAR(10) DEFAULT 'AA',
     wcag_version VARCHAR(10) DEFAULT '2.2',
-    status VARCHAR(50) DEFAULT 'pending', -- pending, scanning, analyzing, completed, failed
+    status VARCHAR(50) DEFAULT 'pending', -- pending, queued, scanning, analyzing, completed, failed
     progress INTEGER DEFAULT 0,
     depth INTEGER DEFAULT 1,
     include_screenshots BOOLEAN DEFAULT true,
+    celery_task_id VARCHAR(255),
     html_content TEXT,
     screenshots JSONB DEFAULT '[]',
     wcag_violations JSONB DEFAULT '[]',
@@ -85,6 +86,7 @@ CREATE TABLE IF NOT EXISTS wcag_rules (
 -- Create indexes for performance
 CREATE INDEX IF NOT EXISTS idx_audits_user_id ON audits(user_id);
 CREATE INDEX IF NOT EXISTS idx_audits_status ON audits(status);
+CREATE INDEX IF NOT EXISTS idx_audits_celery_task_id ON audits(celery_task_id);
 CREATE INDEX IF NOT EXISTS idx_audits_created_at ON audits(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_monitors_user_id ON monitors(user_id);
 CREATE INDEX IF NOT EXISTS idx_monitors_status ON monitors(status);
