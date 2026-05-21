@@ -7,6 +7,7 @@ echo "🚀 Initializing database..."
 
 # Wait for PostgreSQL to be ready
 echo "⏳ Waiting for PostgreSQL to be ready..."
+export PGPASSWORD=postgres
 until pg_isready -h db -p 5432 -U postgres; do
     echo "PostgreSQL is unavailable - sleeping..."
     sleep 2
